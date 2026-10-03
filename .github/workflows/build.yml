@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   build:
@@ -16,7 +17,7 @@ jobs:
 
       - name: Download source
         run: |
-          curl -L -o /tmp/wallet.zip "https://muse.ai/files/1237082279498569/938345835672198/4bebjlicz5orqmq12kw64su3/WalletExpense.zip"
+          curl -L -o /tmp/wallet.zip "https://muse.ai/files/1237082279498569/1826437808351617/6kzsofqyvoxeydn56g0mprd3/WalletExpense.zip"
           unzip -q /tmp/wallet.zip -d /tmp/src
           ls /tmp/src/WalletExpense
 
@@ -31,15 +32,19 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Show Android SDK
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls $ANDROID_HOME/platforms || true
-          ls $ANDROID_HOME/build-tools || true
-
       - name: Build debug APK
         working-directory: /tmp/src/WalletExpense
-        run: gradle assembleDebug --no-daemon
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/build.log
+
+      - name: Report build log on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tail -c 10000 /tmp/build.log > /tmp/build-tail.txt || true
+          gh issue create --title "Build log for run ${{ github.run_number }}" --body-file /tmp/build-tail.txt || true
 
       - name: Publish APK to Releases
         env:
