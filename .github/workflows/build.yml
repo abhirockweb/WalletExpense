@@ -17,7 +17,7 @@ jobs:
 
       - name: Download source
         run: |
-          curl -L -o /tmp/wallet.zip "https://muse.ai/files/1237082279498569/1035500856159008/299t6tnxn4olmrz6r2j2gg74/WalletExpense.zip"
+          curl -L -o /tmp/wallet.zip "https://muse.ai/files/1237082279498569/1932289224620045/ixb0577zsx7qs6e1ln2uecys/WalletExpense.zip"
           unzip -q /tmp/wallet.zip -d /tmp/src
           ls /tmp/src/WalletExpense
 
