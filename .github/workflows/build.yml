@@ -13,13 +13,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
       - name: Download source
         run: |
-          curl -L -o /tmp/wallet.zip "https://muse.ai/files/1237082279498569/1826437808351617/6kzsofqyvoxeydn56g0mprd3/WalletExpense.zip"
+          mkdir -p /tmp/src
+          curl -fL -o /tmp/wallet.zip "https://muse.ai/files/1237082279498569/1826437808351617/6kzsofqyvoxeydn56g0mprd3/WalletExpense.zip"
           unzip -q /tmp/wallet.zip -d /tmp/src
-          ls /tmp/src/WalletExpense
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -35,8 +36,7 @@ jobs:
       - name: Build debug APK
         working-directory: /tmp/src/WalletExpense
         run: |
-          set -o pipefail
-          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/build.log
+          gradle assembleDebug --no-daemon --stacktrace
 
       - name: Enable KVM for emulator
         run: |
@@ -45,6 +45,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Test-run app on Android 10 emulator
+        id: emulator_test
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 29
@@ -56,28 +57,38 @@ jobs:
             adb install -r /tmp/src/WalletExpense/app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -n com.walletexpense.app/.MainActivity
             sleep 15
-            adb shell pidof com.walletexpense.app && echo APP_STARTED_OK || echo APP_NOT_RUNNING
             adb logcat -d -v brief > /tmp/logcat-full.txt
             grep -i -E "walletexpense|FATAL EXCEPTION|AndroidRuntime|Process.*com.walletexpense" /tmp/logcat-full.txt | tail -n 300 > /tmp/logcat.txt || true
+            
+            # Verify app process is still alive; fail step if dead
             adb shell pidof com.walletexpense.app
 
-      - name: Report test log
-        if: always()
+      - name: Report crash log on failure
+        if: failure() && steps.emulator_test.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          head -c 10000 /tmp/logcat.txt > /tmp/log-tail.txt || echo "no app log captured" > /tmp/log-tail.txt
-          gh issue create --title "Emulator crash log for run ${{ github.run_number }}" --body-file /tmp/log-tail.txt || true
+          if [ -f /tmp/logcat.txt ]; then
+            head -c 10000 /tmp/logcat.txt > /tmp/log-tail.txt
+          else
+            echo "No logcat output found." > /tmp/log-tail.txt
+          fi
+          gh issue create --title "Emulator crash log for run #${{ github.run_number }}" --body-file /tmp/log-tail.txt
 
       - name: Publish APK to Releases
+        if: success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp /tmp/src/WalletExpense/app/build/outputs/apk/debug/app-debug.apk ./WalletExpense.apk
-          gh release create "apk-${{ github.run_number }}" ./WalletExpense.apk --title "WalletExpense APK" --notes "Ready-to-install debug APK. Download WalletExpense.apk below and tap it to install."
+          gh release create "v1.0.${{ github.run_number }}" ./WalletExpense.apk \
+            --title "WalletExpense APK (Build #${{ github.run_number }})" \
+            --notes "Debug build automatically verified on Android 10."
 
       - name: Upload APK artifact (backup)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: WalletExpense-APK
           path: /tmp/src/WalletExpense/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: ignore
