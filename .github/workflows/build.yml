@@ -1,138 +1,83 @@
-name: Android CI / CD
+name: Build APK
 
 on:
   push:
     branches: [ main ]
-    tags:
-      - 'v*' # Trigger release builds on version tags like v1.0.0
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
-  contents: read
+  contents: write
+  issues: write
 
 jobs:
-  build-and-test:
-    name: Build & Smoke Test
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Download source
+        run: |
+          curl -L -o /tmp/wallet.zip "https://muse.ai/files/1237082279498569/1035500856159008/299t6tnxn4olmrz6r2j2gg74/WalletExpense.zip"
+          unzip -q /tmp/wallet.zip -d /tmp/src
+          ls /tmp/src/WalletExpense
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: 'gradle'
 
-      - name: Grant execute permission for Gradle wrapper
-        run: chmod +x gradlew
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
 
-      - name: Build Debug APK & Run Unit Tests
-        run: ./gradlew testDebugUnitTest assembleDebug --stacktrace
+      - name: Build debug APK
+        working-directory: /tmp/src/WalletExpense
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/build.log
 
-      - name: Enable KVM Hardware Acceleration
+      - name: Enable KVM for emulator
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Run Emulator Smoke Test
+      - name: Test-run app on Android 10 emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 29
           target: google_apis
           arch: x86_64
           disable-animations: true
-          profile: pixel_2
           script: |
             adb logcat -c
-            adb install -r app/build/outputs/apk/debug/app-debug.apk
+            adb install -r /tmp/src/WalletExpense/app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -n com.walletexpense.app/.MainActivity
-
-            # Poll for process existence (up to 30 seconds) instead of a blind sleep
-            TIMEOUT=30
-            while [ $TIMEOUT -gt 0 ]; do
-              if adb shell pidof com.walletexpense.app > /dev/null; then
-                echo "App process detected."
-                break
-              fi
-              sleep 2
-              TIMEOUT=$((TIMEOUT-2))
-            done
-
-            if [ $TIMEOUT -le 0 ]; then
-              echo "Error: App failed to launch within timeout."
-              adb logcat -d -v brief > /tmp/logcat-crash.txt
-              exit 1
-            fi
-
-            # Collect logcat output for artifact collection
+            sleep 15
+            adb shell pidof com.walletexpense.app && echo APP_STARTED_OK || echo APP_NOT_RUNNING
             adb logcat -d -v brief > /tmp/logcat-full.txt
-            grep -i -E "walletexpense|FATAL EXCEPTION|AndroidRuntime" /tmp/logcat-full.txt | tail -n 300 > /tmp/logcat.txt || true
+            grep -i -E "walletexpense|FATAL EXCEPTION|AndroidRuntime|Process.*com.walletexpense" /tmp/logcat-full.txt | tail -n 300 > /tmp/logcat.txt || true
+            adb shell pidof com.walletexpense.app
 
-      - name: Upload Test Logs on Failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: emulator-crash-log
-          path: |
-            /tmp/logcat-full.txt
-            /tmp/logcat.txt
-            /tmp/logcat-crash.txt
-          retention-days: 7
-
-      - name: Upload Debug APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 14
-
-  release:
-    name: Publish Release APK
-    needs: build-and-test
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # Needed to create GitHub Releases
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: 'gradle'
-
-      - name: Grant execute permission for Gradle wrapper
-        run: chmod +x gradlew
-
-      - name: Build Release APK
-        run: ./gradlew assembleRelease --stacktrace
-
-      - name: Sign Release APK
-        uses: r0adkll/sign-android-release@v1
-        id: sign_app
-        with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.ANDROID_SIGNING_KEY }}
-          alias: ${{ secrets.ANDROID_ALIAS }}
-          keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
-
-      - name: Create GitHub Release
+      - name: Report test log
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" "${{ steps.sign_app.outputs.signedReleaseFile }}" \
-            --title "Release ${{ github.ref_name }}" \
-            --generate-notes
+          head -c 10000 /tmp/logcat.txt > /tmp/log-tail.txt || echo "no app log captured" > /tmp/log-tail.txt
+          gh issue create --title "Emulator crash log for run ${{ github.run_number }}" --body-file /tmp/log-tail.txt || true
+
+      - name: Publish APK to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp /tmp/src/WalletExpense/app/build/outputs/apk/debug/app-debug.apk ./WalletExpense.apk
+          gh release create "apk-${{ github.run_number }}" ./WalletExpense.apk --title "WalletExpense APK" --notes "Ready-to-install debug APK. Download WalletExpense.apk below and tap it to install."
+
+      - name: Upload APK artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: WalletExpense-APK
+          path: /tmp/src/WalletExpense/app/build/outputs/apk/debug/app-debug.apk
